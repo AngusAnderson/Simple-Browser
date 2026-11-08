@@ -11,14 +11,28 @@
     ],
   },
   "files": [
-    { "kind": "folder", "path": "Simple-Browser", "target-membership": [ "Simple-Browser" ] },
     {
+      "kind": "folder",
+      "path": "Simple-Browser",
+      "target-membership": [
+        "Simple-Browser",
+      ],
+      "membership-exceptions": [
+        {
+          "target": "Simple-Browser",
+          "exclusions": [
+            "Info.plist",
+          ],
+        },
+      ],
+    }, {
       "kind": "group",
       "name": "Products",
       "children": [
         { "path": "<PRODUCTS>/Simple-Browser.app", "id": "000000000000000000000120", "type": "wrapper.application", "index": false },
       ],
     },
+    { "kind": "folder", "path": "Features", "target-membership": [ "Simple-Browser" ] },
   ],
   "targets": [
     {
@@ -39,6 +53,7 @@
         "ENABLE_PREVIEWS": "YES",
         "ENABLE_USER_SELECTED_FILES": "readonly",
         "GENERATE_INFOPLIST_FILE": "YES",
+        "INFOPLIST_FILE": "Simple-Browser/Info.plist",
         "INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphoneos*]": "YES",
         "INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphonesimulator*]": "YES",
         "INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents[sdk=iphoneos*]": "YES",
