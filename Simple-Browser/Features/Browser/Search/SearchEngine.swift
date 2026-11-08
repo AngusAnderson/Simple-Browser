@@ -4,9 +4,9 @@ enum SearchEngine: String, CaseIterable, Identifiable, Codable {
     case duckduckgo
     case startpage
     case google
-    
+
     var id: String { rawValue }
-    
+
     var displayName: String {
         switch self {
         case .duckduckgo: "DuckDuckGo"
@@ -14,31 +14,23 @@ enum SearchEngine: String, CaseIterable, Identifiable, Codable {
         case .google: "Google"
         }
     }
-    
-    var searchURLTemplate: String {
-        switch self {
-        case .duckduckgo: "https://duckduckgo.com/?q=%@"
-        case .startpage: "https://www.startpage.com/sp/search?query=%@"
-        case .google: "https://www.google.com/search?q=%@"
-        }
-    }
-    
+
     func searchURL(for query: String) -> URL? {
         let baseURL: String
-        let parameterName: String
+        let parameter: String
 
         switch self {
         case .duckduckgo:
             baseURL = "https://duckduckgo.com/"
-            parameterName = "q"
+            parameter = "q"
 
         case .startpage:
             baseURL = "https://www.startpage.com/sp/search"
-            parameterName = "query"
+            parameter = "query"
 
         case .google:
             baseURL = "https://www.google.com/search"
-            parameterName = "q"
+            parameter = "q"
         }
 
         guard var components = URLComponents(string: baseURL) else {
@@ -46,7 +38,7 @@ enum SearchEngine: String, CaseIterable, Identifiable, Codable {
         }
 
         components.queryItems = [
-            URLQueryItem(name: parameterName, value: query)
+            URLQueryItem(name: parameter, value: query)
         ]
 
         return components.url

@@ -4,9 +4,7 @@ import SwiftUI
     var body: some Scene {
         WindowGroup {
             BrowserView()
-                .frame(minWidth: 950, minHeight: 620)
         }
-        .windowStyle(.automatic)
-        .windowToolbarStyle(.unified)
+        .defaultSize(width: 1100, height: 750)
     }
 }
