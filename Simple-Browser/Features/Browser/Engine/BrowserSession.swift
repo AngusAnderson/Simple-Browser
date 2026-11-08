@@ -35,14 +35,13 @@ enum ConnectionState {
     let id = UUID()
     let isPrivate: Bool
 
-    @ObservationIgnored
-    let webView: WKWebView
+    @ObservationIgnored let webView: WKWebView
 
-    @ObservationIgnored
-    private var observations: [NSKeyValueObservation] = []
+    @ObservationIgnored private var observations: [NSKeyValueObservation] = []
 
-    @ObservationIgnored
-    private var isActive = true
+    @ObservationIgnored private var isActive = true
+    
+    @ObservationIgnored var onPageFinished: ((BrowserSession) -> Void)?
 
     private(set) var committedURL: URL?
     private(set) var title = "Browser"
@@ -54,13 +53,14 @@ enum ConnectionState {
 
     var errorMessage: String?
 
-    init(isPrivate: Bool) {
+    init(
+        isPrivate: Bool,
+        dataStore: WKWebsiteDataStore
+    ) {
         self.isPrivate = isPrivate
 
         let configuration = WKWebViewConfiguration()
-        configuration.websiteDataStore = isPrivate
-            ? .nonPersistent()
-            : .default()
+        configuration.websiteDataStore = dataStore
 
         webView = WKWebView(
             frame: .zero,
@@ -102,6 +102,8 @@ enum ConnectionState {
 
     func shutdown() {
         isActive = false
+        onPageFinished = nil
+
         webView.stopLoading()
         webView.navigationDelegate = nil
         webView.uiDelegate = nil
@@ -207,6 +209,8 @@ extension BrowserSession: WKNavigationDelegate {
         committedURL = webView.url
         refreshState()
         updateConnection()
+
+        onPageFinished?(self)
     }
 
     func webView(
