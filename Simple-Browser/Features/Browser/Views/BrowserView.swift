@@ -1,156 +1,198 @@
 import SwiftUI
-import WebKit
 
+@MainActor
 struct BrowserView: View {
-    
-    @State private var preferences = PreferenceStore()
-    @State private var browser: BrowserViewModel?
+    @State private var controller = BrowserController()
+    @State private var addressText = ""
+
+    @FocusState private var addressFocused: Bool
 
     var body: some View {
-        Group {
-            if let browser {
-                browserContent(browser)
-            } else {
-                ProgressView("Preparing browser…")
-            }
-        }
-        .task {
-            if browser == nil {
-                browser = BrowserViewModel(preferences: preferences)
-            }
-        }
-    }
-
-    @ViewBuilder private func browserContent(_ browser: BrowserViewModel) -> some View {
         VStack(spacing: 0) {
-            addressBar(browser)
+            if let session = controller.session {
+                addressBar(session)
 
-            if let error = browser.lastError {
-                errorBanner(error)
+                if session.isLoading {
+                    ProgressView(value: session.progress)
+                        .progressViewStyle(.linear)
+                }
+
+                if let error = session.errorMessage {
+                    banner(error, isError: true)
+                }
+
+                if let status = controller.statusMessage {
+                    banner(status, isError: false)
+                }
+
+                WebViewContainer(webView: session.webView)
+                    .id(session.id)
+            } else {
+                ProgressView(
+                    controller.isClearingData
+                        ? "Clearing website data…"
+                        : "Preparing browser…"
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
-
-            browser.webViewContainer
-                .id(browser.isPrivate)
-                .ignoresSafeArea(edges: .bottom)
         }
-        .navigationTitle(browser.currentURL?.host ?? "Aegis")
+        .frame(minWidth: 900, minHeight: 600)
+        .navigationTitle(controller.session?.title ?? "Simple Browser")
         .toolbar {
-            ToolbarItemGroup(placement: .navigation) {
+            ToolbarItemGroup {
                 Button {
-                    browser.goBack()
+                    controller.session?.goBack()
                 } label: {
                     Image(systemName: "chevron.left")
                 }
-                .disabled(!browser.canGoBack)
+                .help("Back")
+                .disabled(!(controller.session?.canGoBack ?? false))
                 .keyboardShortcut("[", modifiers: .command)
 
                 Button {
-                    browser.goForward()
+                    controller.session?.goForward()
                 } label: {
                     Image(systemName: "chevron.right")
                 }
-                .disabled(!browser.canGoForward)
+                .help("Forward")
+                .disabled(!(controller.session?.canGoForward ?? false))
                 .keyboardShortcut("]", modifiers: .command)
 
                 Button {
-                    browser.reload()
+                    controller.session?.reload()
                 } label: {
                     Image(systemName: "arrow.clockwise")
                 }
+                .help("Reload")
+                .disabled(controller.session == nil)
                 .keyboardShortcut("r", modifiers: .command)
 
-                if browser.isLoading {
-                    Button {
-                        browser.stopLoading()
-                    } label: {
-                        Image(systemName: "xmark")
-                    }
-                    .keyboardShortcut(".", modifiers: .command)
+                Button {
+                    controller.session?.stop()
+                } label: {
+                    Image(systemName: "xmark")
                 }
+                .help("Stop loading")
+                .disabled(!(controller.session?.isLoading ?? false))
+                .keyboardShortcut(".", modifiers: .command)
             }
 
-            ToolbarItemGroup(placement: .primaryAction) {
-                Toggle(isOn: Binding(
-                    get: { browser.isPrivate },
-                    set: { browser.isPrivate = $0 }
-                )) {
+            ToolbarItem {
+                Button {
+                    controller.switchMode()
+                } label: {
                     Label(
-                        "Private Browsing",
-                        systemImage: browser.isPrivate
-                            ? "eye.slash.fill"
+                        controller.session?.isPrivate == true
+                            ? "Private"
+                            : "Normal",
+                        systemImage: controller.session?.isPrivate == true
+                            ? "eye.slash"
                             : "eye"
                     )
                 }
-                .toggleStyle(.switch)
+                .help("Switch browsing mode; closes the current page")
+                .disabled(controller.session == nil)
+            }
 
+            ToolbarItem {
                 Menu {
-                    Picker("Search engine", selection: Binding(
-                        get: { preferences.searchEngine },
-                        set: { preferences.searchEngine = $0 }
-                    )) {
+                    Picker(
+                        "Address Bar Search Engine",
+                        selection: Binding(
+                            get: { controller.preferences.searchEngine },
+                            set: { controller.preferences.searchEngine = $0 }
+                        )
+                    ) {
                         ForEach(SearchEngine.allCases) { engine in
-                            Text(engine.displayName).tag(engine)
+                            Text(engine.displayName)
+                                .tag(engine)
                         }
                     }
 
                     Divider()
 
-                    Button("Clear Website Data") {
-                        browser.clearWebsiteData()
+                    Button("Clear This Mode’s Website Data…") {
+                        controller.clearWebsiteData()
                     }
+                    .disabled(controller.session == nil)
                 } label: {
                     Image(systemName: "ellipsis.circle")
                 }
+                .help("Browser settings")
+            }
+        }
+        .background {
+            Button("Focus Address Bar") {
+                addressFocused = true
+            }
+            .keyboardShortcut("l", modifiers: .command)
+            .hidden()
+        }
+        .onChange(
+            of: controller.session?.committedURL,
+            initial: true
+        ) { _, url in
+            guard !addressFocused else { return }
+            addressText = url?.absoluteString ?? ""
+        }
+        .onChange(of: addressFocused) { _, focused in
+            if !focused {
+                addressText = controller.session?
+                    .committedURL?.absoluteString ?? ""
             }
         }
     }
 
-    private func addressBar(_ browser: BrowserViewModel) -> some View {
+    private func addressBar(_ session: BrowserSession) -> some View {
         HStack(spacing: 10) {
-            Image(
-                systemName: browser.isSecure
-                    ? "lock.fill"
-                    : "exclamationmark.triangle.fill"
-            )
-            .foregroundStyle(
-                browser.isSecure ? .green : .orange
-            )
-            .help(
-                browser.isSecure
-                    ? "Secure connection"
-                    : "Insecure connection"
-            )
+            Image(systemName: session.connection.symbol)
+                .help(session.connection.label)
+                .accessibilityLabel(session.connection.label)
 
             TextField(
-                "Search or enter website address",
-                text: Binding(
-                    get: { browser.addressText },
-                    set: { browser.addressText = $0 }
-                )
+                "Search or enter a website address",
+                text: $addressText
             )
             .textFieldStyle(.roundedBorder)
-            .submitLabel(.go)
+            .focused($addressFocused)
             .onSubmit {
-                browser.loadAddress()
+                controller.navigate(addressText)
+                addressFocused = false
             }
 
-            if browser.isLoading {
-                ProgressView()
-                    .controlSize(.small)
+            if session.isPrivate {
+                Text("Private")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
         }
-        .padding(.horizontal)
-        .padding(.vertical, 8)
-        .background(.bar)
+        .padding(10)
     }
 
-    private func errorBanner(_ message: String) -> some View {
-        Text(message)
-            .font(.callout)
-            .foregroundStyle(.white)
-            .padding(.horizontal)
-            .padding(.vertical, 8)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(.red)
+    private func banner(_ text: String, isError: Bool) -> some View {
+        HStack {
+            Text(text)
+                .font(.callout)
+
+            Spacer()
+
+            Button {
+                if isError {
+                    controller.session?.errorMessage = nil
+                } else {
+                    controller.statusMessage = nil
+                }
+            } label: {
+                Image(systemName: "xmark")
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Dismiss message")
+        }
+        .padding(10)
+        .background(
+            isError
+                ? Color.red.opacity(0.12)
+                : Color.blue.opacity(0.12)
+        )
     }
 }
