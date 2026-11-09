@@ -47,6 +47,8 @@ enum ConnectionState {
     @ObservationIgnored var onOpenRequest: ((URLRequest, Bool) -> Void)?
     @ObservationIgnored var onCreateWebView: ((WKWebViewConfiguration, Bool) -> WKWebView?)?
     @ObservationIgnored var onCloseRequested: (() -> Void)?
+    
+    @ObservationIgnored private var expectsDownloadPolicyInterruption = false
 
     private(set) var committedURL: URL?
     private(set) var title = "Browser"
@@ -121,6 +123,8 @@ enum ConnectionState {
         isActive = false
         onPageFinished = nil
         
+        expectsDownloadPolicyInterruption = false
+        
         onDownload = nil
         onOpenRequest = nil
         onCreateWebView = nil
@@ -178,14 +182,35 @@ enum ConnectionState {
     private func handleFailure(_ error: Error) {
         let nsError = error as NSError
 
-        if nsError.domain == NSURLErrorDomain,
-           nsError.code == NSURLErrorCancelled {
+        let isDownloadPolicyInterruption =
+            nsError.domain == "WebKitErrorDomain"
+            && nsError.code == WebKitErrorFrameLoadInterruptedByPolicyChange
+
+        if expectsDownloadPolicyInterruption,
+           isDownloadPolicyInterruption {
+            expectsDownloadPolicyInterruption = false
+
+            isLoading = webView.isLoading
+            canGoBack = webView.canGoBack
+            canGoForward = webView.canGoForward
+
+            updateConnection()
+            return
+        }
+
+        let isCancellation =
+            nsError.domain == NSURLErrorDomain
+            && nsError.code == NSURLErrorCancelled
+
+        if isCancellation {
             refreshState()
             return
         }
 
+        expectsDownloadPolicyInterruption = false
         errorMessage = error.localizedDescription
         connection = .failed
+
         refreshState()
     }
 
@@ -287,6 +312,9 @@ extension BrowserSession: WKNavigationDelegate {
         _ webView: WKWebView,
         didStartProvisionalNavigation navigation: WKNavigation!
     ) {
+        // Temp Debug
+        expectsDownloadPolicyInterruption = false
+        
         errorMessage = nil
         connection = .loading
         refreshState()
@@ -339,6 +367,8 @@ extension BrowserSession: WKNavigationDelegate {
 
         if navigationResponse.isForMainFrame,
            !navigationResponse.canShowMIMEType {
+            expectsDownloadPolicyInterruption = true
+
             decisionHandler(.download)
         } else {
             decisionHandler(.allow)
@@ -438,6 +468,9 @@ extension BrowserSession: WKNavigationDelegate {
         }
 
         if navigationAction.shouldPerformDownload {
+            // temp debug
+            expectsDownloadPolicyInterruption = true
+            
             decisionHandler(.download)
             return
         }
