@@ -5,6 +5,8 @@ import WebKit
 @MainActor @Observable final class BrowserController {
     let preferences: PreferencesStore
     let library: LibraryStore
+    
+    let downloads = DownloadManager()
 
     private(set) var tabs: [BrowserTab] = []
     private(set) var selectedTabID: UUID?
@@ -13,7 +15,7 @@ import WebKit
     var statusMessage: String?
 
     @ObservationIgnored private var privateDataStore: WKWebsiteDataStore?
-
+    
     var session: BrowserSession? {
         tabs.first {
             $0.id == selectedTabID
@@ -70,9 +72,7 @@ import WebKit
             dataStore: dataStore
         )
 
-        newSession.onPageFinished = { [weak self] session in
-            self?.pageFinished(session)
-        }
+        configureSession(newSession)
 
         let tab = BrowserTab(session: newSession)
         tabs.append(tab)
@@ -157,7 +157,7 @@ import WebKit
 
         library.addBookmark(title: session.title, url: url)
         persist()
-        statusMessage = "Bookmark saved, or already present."
+        statusMessage = "Bookmark added, or already present. Loacl saving runs in the background."
     }
 
     func removeBookmark(_ id: UUID) {
@@ -335,5 +335,125 @@ import WebKit
         if !tabs.contains(where: { $0.session.isPrivate }) {
             privateDataStore = nil
         }
+    }
+    
+    private func configureSession(_ session: BrowserSession) {
+        session.onPageFinished = { [weak self] finished in
+            self?.pageFinished(finished)
+        }
+
+        session.onDownload = { [weak self, weak session] download in
+            guard let self, let session else {
+                download.cancel(nil)
+                return
+            }
+
+            self.downloads.accept(
+                download,
+                sourceView: session.webView,
+                isPrivate: session.isPrivate
+            )
+
+            self.statusMessage = """
+            Download started. Open Downloads to view its status.
+            """
+        }
+
+        session.onOpenRequest = {
+            [weak self, weak session] request, select in
+
+            guard let self, let session else {
+                return
+            }
+
+            self.openRequestInTab(
+                request,
+                from: session,
+                select: select
+            )
+        }
+
+        session.onCreateWebView = {
+            [weak self, weak session] configuration, select in
+
+            guard let self, let session else {
+                return nil
+            }
+
+            return self.adoptWebView(
+                configuration: configuration,
+                from: session,
+                select: select
+            )
+        }
+
+        session.onCloseRequested = { [weak self, weak session] in
+            guard let self, let session else {
+                return
+            }
+
+            self.closeTab(session.id)
+        }
+    }
+    
+    private func openRequestInTab(
+        _ request: URLRequest,
+        from source: BrowserSession,
+        select: Bool
+    ) {
+        guard !isClearingData else {
+            return
+        }
+
+        let session = BrowserSession(
+            isPrivate: source.isPrivate,
+            dataStore: source.webView.configuration.websiteDataStore
+        )
+
+        configureSession(session)
+
+        let tab = BrowserTab(session: session)
+        tabs.append(tab)
+
+        if select {
+            selectedTabID = tab.id
+        }
+
+        session.webView.load(request)
+    }
+    
+    private func adoptWebView(
+        configuration: WKWebViewConfiguration,
+        from source: BrowserSession,
+        select: Bool
+    ) -> WKWebView? {
+        guard !isClearingData else {
+            return nil
+        }
+
+        guard !source.isPrivate
+            || !configuration.websiteDataStore.isPersistent else {
+            statusMessage = """
+            A new browsing context was blocked because its storage \
+            did not match private browsing.
+            """
+            return nil
+        }
+
+        let session = BrowserSession(
+            isPrivate: source.isPrivate,
+            configuration: configuration
+        )
+
+        configureSession(session)
+
+        let tab = BrowserTab(session: session)
+        tabs.append(tab)
+
+        if select {
+            selectedTabID = tab.id
+        }
+
+        return session.webView
     }
 }

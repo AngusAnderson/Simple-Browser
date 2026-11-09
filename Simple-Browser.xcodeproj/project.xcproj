@@ -25,20 +25,14 @@
           ],
         },
       ],
-    }, {
-      "kind": "group",
-      "name": "Products",
-      "children": [
-        { "path": "<PRODUCTS>/Simple-Browser.app", "id": "000000000000000000000120", "type": "wrapper.application", "index": false },
-      ],
     },
-    { "kind": "folder", "path": "Features", "target-membership": [ "Simple-Browser" ] },
+    { "path": "<PRODUCTS>/Simple-Browser.app", "id": "70E49F2230A01C75007EFBD9", "type": "wrapper.application", "index": false },
   ],
   "targets": [
     {
       "name": "Simple-Browser",
       "id": "000000000000000100000000",
-      "product": "Products/Simple-Browser.app",
+      "product": "Simple-Browser.app",
       "product-type": "application",
       "build-phases": [
         "compile-sources",
@@ -50,8 +44,18 @@
         "CURRENT_PROJECT_VERSION": "1",
         "DEVELOPMENT_TEAM": "7G33JTYW63",
         "ENABLE_APP_SANDBOX": "YES",
+        "ENABLE_INCOMING_NETWORK_CONNECTIONS": "NO",
+        "ENABLE_OUTGOING_NETWORK_CONNECTIONS": "YES",
         "ENABLE_PREVIEWS": "YES",
-        "ENABLE_USER_SELECTED_FILES": "readonly",
+        "ENABLE_RESOURCE_ACCESS_AUDIO_INPUT": "NO",
+        "ENABLE_RESOURCE_ACCESS_BLUETOOTH": "NO",
+        "ENABLE_RESOURCE_ACCESS_CALENDARS": "NO",
+        "ENABLE_RESOURCE_ACCESS_CAMERA": "NO",
+        "ENABLE_RESOURCE_ACCESS_CONTACTS": "NO",
+        "ENABLE_RESOURCE_ACCESS_LOCATION": "NO",
+        "ENABLE_RESOURCE_ACCESS_PRINTING": "NO",
+        "ENABLE_RESOURCE_ACCESS_USB": "NO",
+        "ENABLE_USER_SELECTED_FILES": "readwrite",
         "GENERATE_INFOPLIST_FILE": "YES",
         "INFOPLIST_FILE": "Simple-Browser/Info.plist",
         "INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphoneos*]": "YES",
@@ -152,6 +156,8 @@
     "WATCHOS_DEPLOYMENT_TARGET": "27.2",
     "XROS_DEPLOYMENT_TARGET": "27.2",
   },
+  "products-group": [
+  ],
   "last-upgrade": "27.0",
   "last-swift-update": "27.0",
 }
