@@ -6,8 +6,8 @@ import WebKit
 @MainActor @Observable final class DownloadManager: NSObject {
     private(set) var items: [DownloadItem] = []
 
-    @ObservationIgnored
-    private var transfers: [ObjectIdentifier: Transfer] = [:]
+    @ObservationIgnored private var transfers: [ObjectIdentifier: Transfer] = [:]
+    @ObservationIgnored private var resettingModes: Set<Bool> = []
 
     private struct Transfer {
         let download: WKDownload
@@ -21,6 +21,11 @@ import WebKit
         sourceView: WKWebView,
         isPrivate: Bool
     ) {
+        guard !resettingModes.contains(isPrivate) else {
+            download.cancel(nil)
+            return
+        }
+        
         let key = ObjectIdentifier(download)
 
         guard transfers[key] == nil else {
@@ -79,6 +84,52 @@ import WebKit
 
     func clearFinishedItems() {
         items.removeAll { !$0.state.isActive }
+    }
+    
+    func websiteDataStores(isPrivate: Bool) -> [WKWebsiteDataStore] {
+        transfers.values
+            .filter { $0.item.isPrivate == isPrivate }
+            .map { $0.sourceView.configuration.websiteDataStore }
+    }
+
+    func blockNewDownloads(isPrivate: Bool) {
+        resettingModes.insert(isPrivate)
+    }
+
+    func unblockNewDownloads(isPrivate: Bool) {
+        resettingModes.remove(isPrivate)
+    }
+
+    func cancelAndWait(isPrivate: Bool) async {
+        let pending = transfers.compactMap { entry in
+            entry.value.item.isPrivate == isPrivate
+                ? (entry.key, entry.value.download)
+                : nil
+        }
+
+        for (key, download) in pending {
+            guard let transfer = transfers[key] else {
+                continue
+            }
+
+            transfer.item.state = .cancelling
+
+            await withCheckedContinuation {
+                (continuation: CheckedContinuation<Void, Never>) in
+
+                download.cancel { [weak self] _ in
+                    Task { @MainActor [weak self] in
+                        self?.finish(
+                            key: key,
+                            state: .cancelled,
+                            error: nil
+                        )
+
+                        continuation.resume()
+                    }
+                }
+            }
+        }
     }
 
     private func finish(

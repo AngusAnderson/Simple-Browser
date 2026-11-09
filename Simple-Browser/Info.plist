@@ -4,5 +4,11 @@
 <dict>
 	<key>NSAppTransportSecurity</key>
 	<dict/>
+    
+    <key>NSCameraUsageDescription</key>
+    <string>Allow websites you approve to use your camera.</string>
+
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Allow websites you approve to use your microphone.</string>
 </dict>
 </plist>

@@ -7,6 +7,8 @@ import WebKit
     let library: LibraryStore
     
     let downloads = DownloadManager()
+    
+    let contentBlocker = ContentBlocker()
 
     private(set) var tabs: [BrowserTab] = []
     private(set) var selectedTabID: UUID?
@@ -80,7 +82,10 @@ import WebKit
 
         preferences.privateBrowsingEnabled = isPrivate
 
-        newSession.load(url ?? preferences.homepage)
+        loadWhenRulesAreReady(
+            URLRequest(url: url ?? preferences.homepage),
+            in: newSession
+        )
     }
 
     func selectTab(_ id: UUID) {
@@ -116,7 +121,10 @@ import WebKit
     }
 
     func navigate(_ input: String) {
-        guard let session else { return }
+        guard !isClearingData,
+              let session else {
+            return
+        }
 
         guard let url = AddressResolver.resolve(
             input,
@@ -130,7 +138,7 @@ import WebKit
     }
 
     func open(_ url: URL) {
-        guard LibraryStore.isWebURL(url) else { return }
+        guard !isClearingData, LibraryStore.isWebURL(url) else { return }
         session?.load(url)
     }
 
@@ -211,6 +219,37 @@ import WebKit
         preferences.historyEnabled = enabled
         persist()
     }
+    
+    func setContentBlockingEnabled(_ enabled: Bool) {
+        guard !isClearingData else {
+            return
+        }
+
+        contentBlocker.isEnabled = enabled
+
+        contentBlocker.prepare { [weak self] in
+            guard let self else {
+                return
+            }
+
+            for tab in self.tabs {
+                self.contentBlocker.apply(
+                    to: tab.session.webView.configuration
+                )
+            }
+
+            if let error = self.contentBlocker.errorMessage {
+                self.statusMessage = """
+                Content blocking could not be prepared: \(error)
+                """
+            } else {
+                self.statusMessage = """
+                Limited content blocking \(enabled ? "enabled" : "disabled").
+                Reload open pages to test the changed setting.
+                """
+            }
+        }
+    }
 
     func setRestorationEnabled(_ enabled: Bool) {
         guard library.canWrite else { return }
@@ -235,61 +274,75 @@ import WebKit
     }
 
     func clearWebsiteData() {
-        guard let current = session, !isClearingData else {
+        guard let current = session else {
             return
         }
 
-        let mode = current.isPrivate
+        requestWebsiteDataReset(isPrivate: current.isPrivate)
+    }
+
+    func endPrivateSession() {
+        requestWebsiteDataReset(isPrivate: true)
+    }
+
+    func requestWebsiteDataReset(
+        isPrivate: Bool,
+        records: [WKWebsiteDataRecord]? = nil,
+        selectedStore: WKWebsiteDataStore? = nil
+    ) {
+        guard !isClearingData else {
+            return
+        }
+
+        guard records == nil || selectedStore != nil else {
+            return
+        }
+
+        let selectedOnly = records != nil
 
         let confirmed = NativeDialogs.confirm(
-            title: "Clear this mode’s website data?",
+            title: selectedOnly
+                ? "Delete selected website data?"
+                : (
+                    isPrivate
+                        ? "End private session and clear its data?"
+                        : "Clear normal website data?"
+                ),
             message: """
-            All \(mode ? "private" : "normal") tabs will close.
+            All \(isPrivate ? "private" : "normal") tabs will close.
+            Downloads for that mode will be cancelled first.
 
-            Cookies, caches, and website storage for this mode will be \
-            cleared. Saved history and bookmarks are separate.
+            \(selectedOnly
+                ? "Only the selected website records will be deleted."
+                : "Website data for this mode will be deleted.")
+
+            Saved history and bookmarks will not be deleted.
+            Downloaded files will not be deleted.
+
+            Closed normal tabs will also be removed from the \
+            tab-restoration snapshot.
             """,
-            accept: "Close Tabs and Clear"
+            accept: "Continue"
         )
 
-        guard confirmed else { return }
-
-        let store = current.webView.configuration.websiteDataStore
+        guard confirmed else {
+            return
+        }
 
         isClearingData = true
-        statusMessage = nil
+        downloads.blockNewDownloads(isPrivate: isPrivate)
 
-        for tab in tabs where tab.session.isPrivate == mode {
-            tab.session.shutdown()
-        }
-
-        tabs.removeAll { $0.session.isPrivate == mode }
-
-        if !tabs.contains(where: { $0.id == selectedTabID }) {
-            selectedTabID = tabs.first?.id
-        }
-
-        discardPrivateStoreIfUnused()
-        persist()
-
-        store.removeData(
-            ofTypes: WKWebsiteDataStore.allWebsiteDataTypes(),
-            modifiedSince: .distantPast,
-            completionHandler: { [weak self] in
-                Task { @MainActor [weak self] in
-                    guard let self else { return }
-
-                    self.isClearingData = false
-                    self.statusMessage = "Website-data clearing completed."
-
-                    if self.tabs.isEmpty {
-                        self.newTab(
-                            isPrivate: self.preferences.privateBrowsingEnabled
-                        )
-                    }
-                }
+        Task { @MainActor [weak self] in
+            guard let self else {
+                return
             }
-        )
+
+            await self.performWebsiteDataReset(
+                isPrivate: isPrivate,
+                records: records,
+                selectedStore: selectedStore
+            )
+        }
     }
 
     private func pageFinished(_ finishedSession: BrowserSession) {
@@ -329,6 +382,89 @@ import WebKit
         }
 
         library.save()
+    }
+    
+    private func performWebsiteDataReset(
+        isPrivate: Bool,
+        records: [WKWebsiteDataRecord]?,
+        selectedStore: WKWebsiteDataStore?
+    ) async {
+        statusMessage = nil
+
+        var stores = tabs
+            .filter { $0.session.isPrivate == isPrivate }
+            .map { $0.session.webView.configuration.websiteDataStore }
+
+        stores += downloads.websiteDataStores(isPrivate: isPrivate)
+
+        if isPrivate {
+            if let privateDataStore {
+                stores.append(privateDataStore)
+            }
+        } else {
+            stores.append(.default())
+        }
+
+        if let selectedStore {
+            stores.append(selectedStore)
+        }
+
+        for tab in tabs where tab.session.isPrivate == isPrivate {
+            tab.session.shutdown()
+        }
+
+        tabs.removeAll {
+            $0.session.isPrivate == isPrivate
+        }
+
+        if !tabs.contains(where: { $0.id == selectedTabID }) {
+            selectedTabID = tabs.first?.id
+        }
+
+        await downloads.cancelAndWait(isPrivate: isPrivate)
+
+        if let records, let selectedStore {
+            await WebsiteDataManager.remove(
+                records: records,
+                from: selectedStore
+            )
+        } else {
+            var visited = Set<ObjectIdentifier>()
+
+            for store in stores {
+                let identifier = ObjectIdentifier(store)
+
+                guard visited.insert(identifier).inserted else {
+                    continue
+                }
+
+                await WebsiteDataManager.remove(
+                    records: nil,
+                    from: store
+                )
+            }
+        }
+
+        if isPrivate {
+            privateDataStore = nil
+        }
+
+        persist()
+
+        downloads.unblockNewDownloads(isPrivate: isPrivate)
+        isClearingData = false
+
+        statusMessage = records == nil
+            ? "Website-data reset completed."
+            : "Selected website-data deletion completed."
+
+        if tabs.isEmpty {
+            // Do not immediately revisit the homepage and recreate its data.
+            newTab(
+                isPrivate: isPrivate,
+                url: URL(string: "about:blank")!
+            )
+        }
     }
 
     private func discardPrivateStoreIfUnused() {
@@ -396,6 +532,34 @@ import WebKit
         }
     }
     
+    private func loadWhenRulesAreReady(
+        _ request: URLRequest,
+        in session: BrowserSession
+    ) {
+        contentBlocker.prepare { [weak self, weak session] in
+            guard let self,
+                  let session,
+                  !self.isClearingData,
+                  self.tabs.contains(where: {
+                      $0.id == session.id
+                  }) else {
+                return
+            }
+
+            self.contentBlocker.apply(
+                to: session.webView.configuration
+            )
+
+            if let error = self.contentBlocker.errorMessage {
+                self.statusMessage = """
+                Content blocking is unavailable: \(error)
+                """
+            }
+
+            session.webView.load(request)
+        }
+    }
+    
     private func openRequestInTab(
         _ request: URLRequest,
         from source: BrowserSession,
@@ -419,7 +583,10 @@ import WebKit
             selectedTabID = tab.id
         }
 
-        session.webView.load(request)
+        loadWhenRulesAreReady(
+            request,
+            in: session
+        )
     }
     
     private func adoptWebView(
@@ -428,6 +595,11 @@ import WebKit
         select: Bool
     ) -> WKWebView? {
         guard !isClearingData else {
+            return nil
+        }
+
+        guard contentBlocker.isReady else {
+            statusMessage = "Please retry after browser rules finish preparing."
             return nil
         }
 
@@ -440,20 +612,39 @@ import WebKit
             return nil
         }
 
-        let session = BrowserSession(
+        contentBlocker.apply(to: configuration)
+
+        let childSession = BrowserSession(
             isPrivate: source.isPrivate,
             configuration: configuration
         )
 
-        configureSession(session)
+        configureSession(childSession)
 
-        let tab = BrowserTab(session: session)
-        tabs.append(tab)
+        let sourceID = source.id
 
-        if select {
-            selectedTabID = tab.id
+        DispatchQueue.main.async { [weak self, childSession] in
+            guard let self else {
+                childSession.shutdown()
+                return
+            }
+
+            guard !self.isClearingData,
+                  self.tabs.contains(where: {
+                      $0.id == sourceID
+                  }) else {
+                childSession.shutdown()
+                return
+            }
+
+            let tab = BrowserTab(session: childSession)
+            self.tabs.append(tab)
+
+            if select {
+                self.selectedTabID = tab.id
+            }
         }
 
-        return session.webView
+        return childSession.webView
     }
 }
