@@ -1,9 +1,12 @@
 import SwiftUI
+import AppKit
 
 @MainActor struct BrowserView: View {
     @State private var controller = BrowserController()
     @State private var addressText = ""
     @State private var showingLibrary = false
+    
+    @State private var showingDownloads = false
 
     @FocusState private var addressFocused: Bool
 
@@ -15,8 +18,7 @@ import SwiftUI
                 addressBar(session)
 
                 if session.isLoading {
-                    ProgressView(value: session.progress)
-                        .progressViewStyle(.linear)
+                    PageLoadProgress(session: session)
                 }
 
                 if let error = session.errorMessage {
@@ -131,9 +133,24 @@ import SwiftUI
 
                 settingsMenu
             }
+            
+            ToolbarItem {
+                Button {
+                    showingDownloads = true
+                } label: {
+                    Label(
+                        "Downloads",
+                        systemImage: "arrow.down.circle"
+                    )
+                }
+                .help("Show downloads")
+            }
         }
         .sheet(isPresented: $showingLibrary) {
             LibraryView(controller: controller)
+        }
+        .sheet(isPresented: $showingDownloads) {
+            DownloadsView(manager: controller.downloads)
         }
         .background {
             Button("Focus Address Bar") {
@@ -160,6 +177,11 @@ import SwiftUI
             if !focused {
                 syncAddress()
             }
+        }
+        .onReceive(
+            NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)
+        ) { _ in
+            controller.library.finishPendingWrites()
         }
     }
 
@@ -251,6 +273,8 @@ import SwiftUI
             Text(session.isPrivate ? "Private" : "Normal")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+            
+            LibrarySaveStatus(store: controller.library)
         }
         .padding(10)
     }

@@ -7,9 +7,13 @@ final class LibraryStore {
     private(set) var document = LibraryDocument()
     private(set) var errorMessage: String?
     private(set) var canWrite = false
+    private(set) var isSaving = false
 
-    @ObservationIgnored
-    private var fileURL: URL?
+    @ObservationIgnored private var fileURL: URL?
+    @ObservationIgnored private let writer = LibraryFileWriter()
+    @ObservationIgnored private var pendingWrites = 0
+    @ObservationIgnored private var saveRevision = 0
+    @ObservationIgnored private var lastRequestDocument: LibraryDocument?
 
     var bookmarks: [Bookmark] {
         document.bookmarks
@@ -133,22 +137,51 @@ final class LibraryStore {
             Self.isWebURL($0.url)
         }
     }
+    
+    func finishPendingWrites() {
+        writer.waitForPendingWrites()
+    }
+    
+    func retrySave() {
+        lastRequestDocument = nil
+        save()
+    }
 
     func save() {
         guard canWrite, let fileURL else { return }
 
-        do {
-            let encoder = JSONEncoder()
-            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-
-            let data = try encoder.encode(document)
-            try data.write(to: fileURL, options: .atomic)
-
-            errorMessage = nil
-        } catch {
-            errorMessage = """
-            Changes could not be saved: \(error.localizedDescription)
-            """
+        let snapshot = document
+        
+        if snapshot == lastRequestDocument { return }
+        
+        lastRequestDocument = snapshot
+        
+        saveRevision += 1
+        let revision = saveRevision
+        
+        pendingWrites += 1
+        isSaving = true
+        
+        writer.write(
+            document: snapshot,
+            to: fileURL
+        ) { [weak self] failure in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                
+                self.pendingWrites -= 1
+                self.isSaving = self.pendingWrites > 0
+                
+                guard revision == self.saveRevision else { return }
+                
+                if let failure {
+                    self.errorMessage = "Changes could not be saved: \(failure)"
+                    
+                    self.lastRequestDocument = nil
+                } else {
+                    self.errorMessage = nil
+                }
+            }
         }
     }
 

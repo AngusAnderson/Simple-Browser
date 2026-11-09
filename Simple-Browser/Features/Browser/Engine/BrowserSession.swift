@@ -42,6 +42,13 @@ enum ConnectionState {
     @ObservationIgnored private var isActive = true
     
     @ObservationIgnored var onPageFinished: ((BrowserSession) -> Void)?
+    
+    @ObservationIgnored var onDownload: ((WKDownload) -> Void)?
+    @ObservationIgnored var onOpenRequest: ((URLRequest, Bool) -> Void)?
+    @ObservationIgnored var onCreateWebView: ((WKWebViewConfiguration, Bool) -> WKWebView?)?
+    @ObservationIgnored var onCloseRequested: (() -> Void)?
+    
+    @ObservationIgnored private var expectsDownloadPolicyInterruption = false
 
     private(set) var committedURL: URL?
     private(set) var title = "Browser"
@@ -53,26 +60,38 @@ enum ConnectionState {
 
     var errorMessage: String?
 
-    init(
+    convenience init(
         isPrivate: Bool,
         dataStore: WKWebsiteDataStore
     ) {
-        self.isPrivate = isPrivate
-
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = dataStore
-
+        
+        self.init(
+            isPrivate: isPrivate,
+            configuration: configuration
+        )
+    }
+    
+    init(
+        isPrivate: Bool,
+        configuration: WKWebViewConfiguration
+    ) {
+        self.isPrivate = isPrivate
+        
+        configuration.preferences.javaScriptCanOpenWindowsAutomatically = false
+        
         webView = WKWebView(
             frame: .zero,
             configuration: configuration
         )
-
+        
         super.init()
-
+        
         webView.navigationDelegate = self
         webView.uiDelegate = self
         webView.allowsBackForwardNavigationGestures = true
-
+        
         installObservations()
     }
 
@@ -103,6 +122,13 @@ enum ConnectionState {
     func shutdown() {
         isActive = false
         onPageFinished = nil
+        
+        expectsDownloadPolicyInterruption = false
+        
+        onDownload = nil
+        onOpenRequest = nil
+        onCreateWebView = nil
+        onCloseRequested = nil
 
         webView.stopLoading()
         webView.navigationDelegate = nil
@@ -111,27 +137,15 @@ enum ConnectionState {
         observations.forEach { $0.invalidate() }
         observations.removeAll()
     }
+    
+    private func handOffDownload(_ download: WKDownload) {
+        isLoading = false
 
-    private func installObservations() {
-        observations = [
-            watch(\.estimatedProgress),
-            watch(\.isLoading),
-            watch(\.canGoBack),
-            watch(\.canGoForward),
-            watch(\.url),
-            watch(\.title),
-            watch(\.hasOnlySecureContent)
-        ]
-    }
-
-    private func watch<Value>(
-        _ keyPath: KeyPath<WKWebView, Value>
-    ) -> NSKeyValueObservation {
-        webView.observe(keyPath, options: [.new]) { [weak self] _, _ in
-            Task { @MainActor [weak self] in
-                guard let self, self.isActive else { return }
-                self.refreshState()
-            }
+        if let onDownload {
+            onDownload(download)
+        } else {
+            download.cancel(nil)
+            errorMessage = "The download manager is unavailable."
         }
     }
 
@@ -168,19 +182,128 @@ enum ConnectionState {
     private func handleFailure(_ error: Error) {
         let nsError = error as NSError
 
-        if nsError.domain == NSURLErrorDomain,
-           nsError.code == NSURLErrorCancelled {
+        let isDownloadPolicyInterruption =
+            nsError.domain == "WebKitErrorDomain"
+            && nsError.code == WebKitErrorFrameLoadInterruptedByPolicyChange
+
+        if expectsDownloadPolicyInterruption,
+           isDownloadPolicyInterruption {
+            expectsDownloadPolicyInterruption = false
+
+            isLoading = webView.isLoading
+            canGoBack = webView.canGoBack
+            canGoForward = webView.canGoForward
+
+            updateConnection()
+            return
+        }
+
+        let isCancellation =
+            nsError.domain == NSURLErrorDomain
+            && nsError.code == NSURLErrorCancelled
+
+        if isCancellation {
             refreshState()
             return
         }
 
+        expectsDownloadPolicyInterruption = false
         errorMessage = error.localizedDescription
         connection = .failed
+
         refreshState()
     }
 
     private func dialogTitle(for frame: WKFrameInfo) -> String {
         "Website dialog — \(frame.request.url?.host ?? "Unknown origin")"
+    }
+    
+    private func installObservations() {
+        observations = [
+            webView.observe(
+                \.estimatedProgress,
+                 options: [.new]
+            ) { [weak self] _, _ in
+                Task { @MainActor [weak self] in
+                    guard let self, self.isActive else { return }
+                    
+                    self.progress = self.webView.estimatedProgress
+                }
+            },
+            
+            webView.observe(
+                \.isLoading,
+                 options: [.new]
+            ) { [weak self] _, _ in
+                Task { @MainActor [weak self] in
+                    guard let self, self.isActive else { return }
+                    
+                    self.progress = self.webView.estimatedProgress
+                }
+            },
+            
+            webView.observe(
+                \.canGoBack,
+                 options: [.new]
+            ) { [weak self] _, _ in
+                Task { @MainActor [weak self] in
+                    guard let self, self.isActive else { return }
+                    
+                    self.canGoBack = self.webView.canGoBack
+                }
+            },
+            
+            webView.observe(
+                \.canGoForward,
+                 options: [.new]
+            ) { [weak self] _, _ in
+                Task { @MainActor [weak self] in
+                    guard let self, self.isActive else { return }
+                    
+                    self.canGoForward = self.webView.canGoForward
+                }
+            },
+            
+            webView.observe(
+                \.title,
+                 options: [.new]
+            ) { [weak self] _, _ in
+                Task { @MainActor [weak self] in
+                    guard let self, self.isActive else { return }
+                    
+                    self.title = self.webView.title ?? self.committedURL?.host ?? "Browser"
+                }
+            },
+            
+            webView.observe(
+                \.url,
+                 options: [.new]
+            ) { [weak self] _, _ in
+                Task { @MainActor [weak self] in
+                    guard let self, self.isActive else { return }
+                    
+                    if !self.webView.isLoading,
+                       self.committedURL != nil {
+                        self.committedURL = self.webView.url
+                        self.updateConnection()
+                    }
+                }
+            },
+            
+            webView.observe(
+                \.hasOnlySecureContent,
+                 options: [.new]
+            ) { [weak self] _, _ in
+                Task { @MainActor [weak self] in
+                    guard let self,
+                          self.isActive,
+                          !self.webView.isLoading,
+                          self.errorMessage == nil else { return }
+                    
+                    self.updateConnection()
+                }
+            }
+        ]
     }
 }
 
@@ -189,6 +312,9 @@ extension BrowserSession: WKNavigationDelegate {
         _ webView: WKWebView,
         didStartProvisionalNavigation navigation: WKNavigation!
     ) {
+        // Temp Debug
+        expectsDownloadPolicyInterruption = false
+        
         errorMessage = nil
         connection = .loading
         refreshState()
@@ -228,6 +354,42 @@ extension BrowserSession: WKNavigationDelegate {
     ) {
         handleFailure(error)
     }
+    
+    func webView(
+        _ webView: WKWebView,
+        decidePolicyFor navigationResponse: WKNavigationResponse,
+        decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void
+    ) {
+        guard isActive else {
+            decisionHandler(.cancel)
+            return
+        }
+
+        if navigationResponse.isForMainFrame,
+           !navigationResponse.canShowMIMEType {
+            expectsDownloadPolicyInterruption = true
+
+            decisionHandler(.download)
+        } else {
+            decisionHandler(.allow)
+        }
+    }
+
+    func webView(
+        _ webView: WKWebView,
+        navigationAction: WKNavigationAction,
+        didBecome download: WKDownload
+    ) {
+        handOffDownload(download)
+    }
+
+    func webView(
+        _ webView: WKWebView,
+        navigationResponse: WKNavigationResponse,
+        didBecome download: WKDownload
+    ) {
+        handOffDownload(download)
+    }
 
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
         errorMessage = "The webpage process stopped. Reload to try again."
@@ -246,38 +408,34 @@ extension BrowserSession: WKNavigationDelegate {
             return
         }
 
-        if navigationAction.targetFrame == nil {
-            decisionHandler(.cancel)
-
-            if navigationAction.navigationType == .linkActivated {
-                webView.load(navigationAction.request)
-            }
-
-            return
-        }
-
         switch NavigationPolicy.decision(for: url) {
         case .allow:
-            decisionHandler(.allow)
+            break
 
         case .confirmHTTP:
-            guard navigationAction.targetFrame?.isMainFrame == true else {
+            let isTopLevel = navigationAction.targetFrame == nil
+                || navigationAction.targetFrame?.isMainFrame == true
+
+            guard isTopLevel else {
                 decisionHandler(.cancel)
                 return
             }
 
-            let allowed = NativeDialogs.confirm(
+            let accepted = NativeDialogs.confirm(
                 title: "Open an unencrypted page?",
                 message: """
                 \(url.absoluteString)
 
                 This connection is not protected by HTTPS.
-                Network policy may still prevent the page from loading.
+                Network policy may still prevent it from loading.
                 """,
                 accept: "Continue"
             )
 
-            decisionHandler(allowed ? .allow : .cancel)
+            guard accepted else {
+                decisionHandler(.cancel)
+                return
+            }
 
         case .confirmExternalApplication:
             decisionHandler(.cancel)
@@ -286,23 +444,54 @@ extension BrowserSession: WKNavigationDelegate {
                 return
             }
 
-            let allowed = NativeDialogs.confirm(
+            let accepted = NativeDialogs.confirm(
                 title: "Open another application?",
                 message: url.absoluteString,
                 accept: "Open Application"
             )
 
-            if allowed {
+            if accepted {
                 NSWorkspace.shared.open(url)
             }
+
+            return
 
         case .block:
             decisionHandler(.cancel)
 
-            if navigationAction.targetFrame?.isMainFrame == true {
+            if navigationAction.targetFrame == nil
+                || navigationAction.targetFrame?.isMainFrame == true {
                 errorMessage = "This type of navigation is not supported."
             }
+
+            return
         }
+
+        if navigationAction.shouldPerformDownload {
+            // temp debug
+            expectsDownloadPolicyInterruption = true
+            
+            decisionHandler(.download)
+            return
+        }
+
+        if navigationAction.targetFrame == nil {
+            decisionHandler(.allow)
+            return
+        }
+
+        if navigationAction.navigationType == .linkActivated,
+           navigationAction.modifierFlags.contains(.command) {
+            decisionHandler(.cancel)
+
+            onOpenRequest?(
+                navigationAction.request,
+                false
+            )
+            return
+        }
+
+        decisionHandler(.allow)
     }
 }
 
@@ -348,4 +537,39 @@ extension BrowserSession: WKUIDelegate {
         )
         completionHandler(result)
     }
+    
+    func webView(
+        _ webView: WKWebView,
+        runOpenPanelWith parameters: WKOpenPanelParameters,
+        initiatedByFrame frame: WKFrameInfo,
+        completionHandler: @escaping ([URL]?) -> Void
+    ) {
+        guard isActive else {
+            completionHandler(nil)
+            return
+        }
+
+        let panel = NSOpenPanel()
+
+        panel.title = "Choose Files to Upload"
+        panel.message = """
+        Selected items will be made available to \
+        \(frame.request.url?.host ?? "this website").
+        """
+
+        panel.canChooseFiles = true
+
+        panel.canChooseDirectories = false
+
+        panel.allowsMultipleSelection = parameters.allowsMultipleSelection
+
+        guard panel.runModal() == .OK else {
+            completionHandler(nil)
+            return
+        }
+
+        completionHandler(panel.urls)
+    }
+    
+    
 }
