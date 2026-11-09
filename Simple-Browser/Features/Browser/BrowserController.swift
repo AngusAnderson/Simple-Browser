@@ -352,35 +352,33 @@ import WebKit
             return
         }
 
-        if preferences.historyEnabled,
-           !finishedSession.isPrivate,
+        let shouldRecord = BrowserPrivacyPolicy.shouldRecordHistory(
+            enabled: preferences.historyEnabled,
+            isPrivate: finishedSession.isPrivate
+        )
+        
+        if shouldRecord,
            let url = finishedSession.committedURL {
-            library.recordVisit(
-                title: finishedSession.title,
-                url: url
-            )
+            library.recordVisit(title: finishedSession.title, url: url)
         }
 
         persist()
     }
 
     private func persist() {
-        if preferences.restoreNormalTabs {
-            let saved = tabs.compactMap { tab -> SavedTab? in
-                guard !tab.session.isPrivate,
-                      let url = tab.session.committedURL,
-                      LibraryStore.isWebURL(url) else {
-                    return nil
-                }
-
-                return SavedTab(url: url)
-            }
-
-            library.setSavedTabs(saved)
-        } else {
-            library.setSavedTabs([])
+        let candidate = tabs.map {
+            TabPersistenceCandidate(
+                url: $0.session.committedURL,
+                isPrivate: $0.session.isPrivate
+            )
         }
+        
+        let savedTabs = BrowserPrivacyPolicy.restorableTabs(
+            from: candidate,
+            enabled: preferences.restoreNormalTabs
+        )
 
+        library.setSavedTabs(savedTabs)
         library.save()
     }
     
@@ -391,11 +389,21 @@ import WebKit
     ) async {
         statusMessage = nil
 
+        let selectedRecordsOnly = records != nil
+
+        let retainPrivateStore =
+            BrowserPrivacyPolicy.shouldRetainPrivateStore(
+                isPrivate: isPrivate,
+                selectedRecordsOnly: selectedRecordsOnly
+            )
+
         var stores = tabs
             .filter { $0.session.isPrivate == isPrivate }
             .map { $0.session.webView.configuration.websiteDataStore }
 
-        stores += downloads.websiteDataStores(isPrivate: isPrivate)
+        stores += downloads.websiteDataStores(
+            isPrivate: isPrivate
+        )
 
         if isPrivate {
             if let privateDataStore {
@@ -421,7 +429,9 @@ import WebKit
             selectedTabID = tabs.first?.id
         }
 
-        await downloads.cancelAndWait(isPrivate: isPrivate)
+        await downloads.cancelAndWait(
+            isPrivate: isPrivate
+        )
 
         if let records, let selectedStore {
             await WebsiteDataManager.remove(
@@ -446,20 +456,26 @@ import WebKit
         }
 
         if isPrivate {
-            privateDataStore = nil
+            if retainPrivateStore, let selectedStore {
+                privateDataStore = selectedStore
+            } else {
+                privateDataStore = nil
+            }
         }
 
         persist()
 
-        downloads.unblockNewDownloads(isPrivate: isPrivate)
+        downloads.unblockNewDownloads(
+            isPrivate: isPrivate
+        )
+
         isClearingData = false
 
-        statusMessage = records == nil
-            ? "Website-data reset completed."
-            : "Selected website-data deletion completed."
+        statusMessage = selectedRecordsOnly
+            ? "Selected website-data deletion completed."
+            : "Website-data reset completed."
 
-        if tabs.isEmpty {
-            // Do not immediately revisit the homepage and recreate its data.
+        if retainPrivateStore || tabs.isEmpty {
             newTab(
                 isPrivate: isPrivate,
                 url: URL(string: "about:blank")!

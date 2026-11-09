@@ -4,11 +4,14 @@ import WebKit
 
 @MainActor
 struct BrowserView: View {
-    @State private var controller = BrowserController()
     @State private var addressText = ""
     @State private var presentedSheet: BrowserSheet?
+    
+    let controller: BrowserController
 
     @FocusState private var addressFocused: Bool
+    
+    @Environment(\.openSettings) private var openSettings
 
     // MARK: - Sheet Routing
 
@@ -81,6 +84,14 @@ struct BrowserView: View {
             ) { _ in
                 controller.library.finishPendingWrites()
             }
+            .focusedSceneValue(
+                \.browserWindowActions,
+                 BrowserWindowActions(
+                    focusAddress: { addressFocused = true },
+                    showLibrary: { presentedSheet = .library },
+                    showDownloads: { presentedSheet = .downloads }
+                 )
+            )
     }
 
     // MARK: - Browser Content
@@ -261,117 +272,34 @@ struct BrowserView: View {
 
     private var settingsMenu: some View {
         Menu {
-            searchEnginePicker
+            Button("Settings…") {
+                openSettings()
+            }
 
             Divider()
 
-            persistenceSettings
+            Button("Website Data…") {
+                showWebsiteData()
+            }
+            .disabled(controller.session == nil)
 
-            Divider()
-
-            contentBlockingSetting
-
-            Divider()
-
-            privacyActions
+            Button("End Private Session…") {
+                controller.endPrivateSession()
+            }
 
             Divider()
 
             Button("Close Current Tab") {
-                guard let id = controller.selectedTabID else {
-                    return
+                if let id = controller.selectedTabID {
+                    controller.closeTab(id)
                 }
-
-                controller.closeTab(id)
             }
-            .disabled(
-                controller.isClearingData
-                    || controller.selectedTabID == nil
-            )
+            .disabled(controller.selectedTabID == nil)
         } label: {
             Image(systemName: "ellipsis.circle")
         }
         .help("Browser settings")
         .disabled(controller.isClearingData)
-    }
-
-    private var searchEnginePicker: some View {
-        Picker(
-            "Address Bar Search Engine",
-            selection: Binding(
-                get: {
-                    controller.preferences.searchEngine
-                },
-                set: {
-                    controller.preferences.searchEngine = $0
-                }
-            )
-        ) {
-            ForEach(SearchEngine.allCases) { engine in
-                Text(engine.displayName)
-                    .tag(engine)
-            }
-        }
-    }
-
-    @ViewBuilder
-    private var persistenceSettings: some View {
-        Toggle(
-            "Record Normal Browsing History",
-            isOn: Binding(
-                get: {
-                    controller.preferences.historyEnabled
-                },
-                set: {
-                    controller.setHistoryEnabled($0)
-                }
-            )
-        )
-        .disabled(!controller.library.canWrite)
-
-        Toggle(
-            "Restore Normal Tabs on Launch",
-            isOn: Binding(
-                get: {
-                    controller.preferences.restoreNormalTabs
-                },
-                set: {
-                    controller.setRestorationEnabled($0)
-                }
-            )
-        )
-        .disabled(!controller.library.canWrite)
-    }
-
-    private var contentBlockingSetting: some View {
-        Toggle(
-            "Limited Third-Party Filtering",
-            isOn: Binding(
-                get: {
-                    controller.contentBlocker.isEnabled
-                },
-                set: {
-                    controller.setContentBlockingEnabled($0)
-                }
-            )
-        )
-    }
-
-    @ViewBuilder
-    private var privacyActions: some View {
-        Button("Website Data…") {
-            showWebsiteData()
-        }
-        .disabled(controller.session == nil)
-
-        Button("Clear This Mode’s Website Data…") {
-            controller.clearWebsiteData()
-        }
-        .disabled(controller.session == nil)
-
-        Button("End Private Session…") {
-            controller.endPrivateSession()
-        }
     }
 
     // MARK: - Sheets
