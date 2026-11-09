@@ -1,14 +1,16 @@
 import SwiftUI
 
-@MainActor
-struct BrowserView: View {
+@MainActor struct BrowserView: View {
     @State private var controller = BrowserController()
     @State private var addressText = ""
+    @State private var showingLibrary = false
 
     @FocusState private var addressFocused: Bool
 
     var body: some View {
         VStack(spacing: 0) {
+            TabStrip(controller: controller)
+
             if let session = controller.session {
                 addressBar(session)
 
@@ -18,11 +20,22 @@ struct BrowserView: View {
                 }
 
                 if let error = session.errorMessage {
-                    banner(error, isError: true)
+                    messageBar(error, isError: true)
+                }
+
+                if let error = controller.library.errorMessage {
+                    Text(error)
+                        .font(.callout)
+                        .padding(10)
+                        .frame(
+                            maxWidth: .infinity,
+                            alignment: .leading
+                        )
+                        .background(Color.orange.opacity(0.15))
                 }
 
                 if let status = controller.statusMessage {
-                    banner(status, isError: false)
+                    messageBar(status, isError: false)
                 }
 
                 WebViewContainer(webView: session.webView)
@@ -36,7 +49,7 @@ struct BrowserView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
-        .frame(minWidth: 900, minHeight: 600)
+        .frame(minWidth: 950, minHeight: 650)
         .navigationTitle(controller.session?.title ?? "Simple Browser")
         .toolbar {
             ToolbarItemGroup {
@@ -45,81 +58,82 @@ struct BrowserView: View {
                 } label: {
                     Image(systemName: "chevron.left")
                 }
-                .help("Back")
                 .disabled(!(controller.session?.canGoBack ?? false))
                 .keyboardShortcut("[", modifiers: .command)
+                .help("Back")
 
                 Button {
                     controller.session?.goForward()
                 } label: {
                     Image(systemName: "chevron.right")
                 }
-                .help("Forward")
                 .disabled(!(controller.session?.canGoForward ?? false))
                 .keyboardShortcut("]", modifiers: .command)
+                .help("Forward")
 
                 Button {
                     controller.session?.reload()
                 } label: {
                     Image(systemName: "arrow.clockwise")
                 }
-                .help("Reload")
                 .disabled(controller.session == nil)
                 .keyboardShortcut("r", modifiers: .command)
+                .help("Reload")
 
                 Button {
                     controller.session?.stop()
                 } label: {
                     Image(systemName: "xmark")
                 }
-                .help("Stop loading")
                 .disabled(!(controller.session?.isLoading ?? false))
                 .keyboardShortcut(".", modifiers: .command)
+                .help("Stop loading")
             }
 
-            ToolbarItem {
+            ToolbarItemGroup {
                 Button {
-                    controller.switchMode()
+                    controller.newTab(isPrivate: false)
                 } label: {
-                    Label(
-                        controller.session?.isPrivate == true
-                            ? "Private"
-                            : "Normal",
-                        systemImage: controller.session?.isPrivate == true
-                            ? "eye.slash"
-                            : "eye"
-                    )
+                    Label("New Tab", systemImage: "plus")
                 }
-                .help("Switch browsing mode; closes the current page")
-                .disabled(controller.session == nil)
-            }
+                .keyboardShortcut("t", modifiers: .command)
+                .disabled(controller.isClearingData)
 
-            ToolbarItem {
-                Menu {
-                    Picker(
-                        "Address Bar Search Engine",
-                        selection: Binding(
-                            get: { controller.preferences.searchEngine },
-                            set: { controller.preferences.searchEngine = $0 }
-                        )
-                    ) {
-                        ForEach(SearchEngine.allCases) { engine in
-                            Text(engine.displayName)
-                                .tag(engine)
-                        }
-                    }
-
-                    Divider()
-
-                    Button("Clear This Mode’s Website Data…") {
-                        controller.clearWebsiteData()
-                    }
-                    .disabled(controller.session == nil)
+                Button {
+                    controller.newTab(isPrivate: true)
                 } label: {
-                    Image(systemName: "ellipsis.circle")
+                    Label("New Private Tab", systemImage: "eye.slash")
                 }
-                .help("Browser settings")
+                .keyboardShortcut(
+                    "p",
+                    modifiers: [.command, .shift]
+                )
+                .disabled(controller.isClearingData)
+
+                Button {
+                    controller.bookmarkCurrentPage()
+                } label: {
+                    Image(systemName: "bookmark")
+                }
+                .help("Bookmark current page")
+                .keyboardShortcut("d", modifiers: .command)
+                .disabled(
+                    controller.session?.committedURL == nil
+                        || !controller.library.canWrite
+                )
+
+                Button {
+                    showingLibrary = true
+                } label: {
+                    Label("Library", systemImage: "books.vertical")
+                }
+                .disabled(controller.isClearingData)
+
+                settingsMenu
             }
+        }
+        .sheet(isPresented: $showingLibrary) {
+            LibraryView(controller: controller)
         }
         .background {
             Button("Focus Address Bar") {
@@ -129,17 +143,91 @@ struct BrowserView: View {
             .hidden()
         }
         .onChange(
-            of: controller.session?.committedURL,
+            of: controller.selectedTabID,
             initial: true
-        ) { _, url in
-            guard !addressFocused else { return }
-            addressText = url?.absoluteString ?? ""
+        ) { _, _ in
+            addressFocused = false
+            syncAddress()
+        }
+        .onChange(
+            of: controller.session?.committedURL
+        ) { _, _ in
+            if !addressFocused {
+                syncAddress()
+            }
         }
         .onChange(of: addressFocused) { _, focused in
             if !focused {
-                addressText = controller.session?
-                    .committedURL?.absoluteString ?? ""
+                syncAddress()
             }
+        }
+    }
+
+    private var settingsMenu: some View {
+        Menu {
+            Picker(
+                "Address Bar Search Engine",
+                selection: Binding(
+                    get: {
+                        controller.preferences.searchEngine
+                    },
+                    set: {
+                        controller.preferences.searchEngine = $0
+                    }
+                )
+            ) {
+                ForEach(SearchEngine.allCases) { engine in
+                    Text(engine.displayName)
+                        .tag(engine)
+                }
+            }
+
+            Divider()
+
+            Toggle(
+                "Record Normal Browsing History",
+                isOn: Binding(
+                    get: {
+                        controller.preferences.historyEnabled
+                    },
+                    set: {
+                        controller.setHistoryEnabled($0)
+                    }
+                )
+            )
+            .disabled(!controller.library.canWrite)
+
+            Toggle(
+                "Restore Normal Tabs on Launch",
+                isOn: Binding(
+                    get: {
+                        controller.preferences.restoreNormalTabs
+                    },
+                    set: {
+                        controller.setRestorationEnabled($0)
+                    }
+                )
+            )
+            .disabled(!controller.library.canWrite)
+
+            Divider()
+
+            Button("Close Current Tab") {
+                if let id = controller.selectedTabID {
+                    controller.closeTab(id)
+                }
+            }
+            .disabled(controller.isClearingData)
+
+            Button("Clear This Mode’s Website Data…") {
+                controller.clearWebsiteData()
+            }
+            .disabled(
+                controller.session == nil
+                    || controller.isClearingData
+            )
+        } label: {
+            Image(systemName: "ellipsis.circle")
         }
     }
 
@@ -160,16 +248,17 @@ struct BrowserView: View {
                 addressFocused = false
             }
 
-            if session.isPrivate {
-                Text("Private")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
+            Text(session.isPrivate ? "Private" : "Normal")
+                .font(.caption)
+                .foregroundStyle(.secondary)
         }
         .padding(10)
     }
 
-    private func banner(_ text: String, isError: Bool) -> some View {
+    private func messageBar(
+        _ text: String,
+        isError: Bool
+    ) -> some View {
         HStack {
             Text(text)
                 .font(.callout)
@@ -194,5 +283,10 @@ struct BrowserView: View {
                 ? Color.red.opacity(0.12)
                 : Color.blue.opacity(0.12)
         )
+    }
+
+    private func syncAddress() {
+        addressText = controller.session?
+            .committedURL?.absoluteString ?? ""
     }
 }
